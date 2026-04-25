@@ -29,6 +29,8 @@ def _gather_precipitation(cfg: dict, output_dir: Path) -> None:
         end_date=period["end_date"],
     )
 
+    series.index += pd.Timedelta(minutes=10)
+
     out = output_dir/"precipitation.csv"
     series.to_csv(out, header=True)
     print(f"Precipitation saved -> {out}")
