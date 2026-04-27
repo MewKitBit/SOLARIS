@@ -19,7 +19,7 @@ def _load_config() -> dict:
         return tomllib.load(f)
 
 
-def _fetch_omet(cfg: dict) -> pd.DataFrame:
+def _gather_omet(cfg: dict, output_dir: Path) -> pd.DataFrame:
     loc = cfg["location"]
     period = cfg["period"]
 
@@ -31,15 +31,19 @@ def _fetch_omet(cfg: dict) -> pd.DataFrame:
     )
 
     df.index += pd.Timedelta(minutes=10)
+    out = output_dir/"meteorology.csv"
+    df.to_csv(out)
+    print(f"Precipitation & pressure saved -> {out}")
     return df
 
-def _fetch_solar(cfg: dict) -> pd.DataFrame:
+
+def _gather_solar(cfg: dict, output_dir: Path) -> pd.DataFrame:
     loc = cfg["location"]
     period = cfg["period"]
     solar = cfg["solar"]
     timezone = loc["timezone"]
 
-    return fetch_solar_data(
+    df = fetch_solar_data(
         latitude=loc["latitude"],
         longitude=loc["longitude"],
         timezone=timezone,
@@ -47,40 +51,22 @@ def _fetch_solar(cfg: dict) -> pd.DataFrame:
         final_date=pd.Timestamp(period["end_date"], tz=timezone),
         tilt=solar["tilt"],
         azimuth=solar["azimuth"],
-    )
+        )
 
+    if not df.empty:
+        out = output_dir/"solar_position.csv"
+        df.to_csv(out)
+        print(f"Solar data saved -> {out}")
 
-def _gather_omet(cfg: dict, output_dir: Path) -> None:
-    df = _fetch_omet(cfg)
-    out = output_dir/"meteorology.csv"
-    df.to_csv(out)
-    print(f"Precipitation & pressure saved -> {out}")
-
-
-def _gather_solar(cfg: dict, output_dir: Path) -> None:
-    df = _fetch_solar(cfg)
-    if df.empty:
-        print("Solar data fetch failed, nothing saved.")
-        return
-
-    out = output_dir/"solar_position.csv"
-    df.to_csv(out)
-    print(f"Solar data saved -> {out}")
+    return df
 
 
 def _gather_combined(cfg: dict, output_dir: Path) -> None:
-    omet_df = _fetch_omet(cfg)
-    solar_df = _fetch_solar(cfg)
-
+    solar_df = _gather_solar(cfg, output_dir)
     if solar_df.empty:
-        print("Solar data fetch failed, combined file not written.")
         return
 
-    omet_df.to_csv(output_dir/"meteorology.csv")
-    print(f"Precipitation & pressure saved -> {output_dir/'meteorology.csv'}")
-
-    solar_df.to_csv(output_dir/"solar_position.csv")
-    print(f"Solar data saved -> {output_dir/'solar_position.csv'}")
+    omet_df = _gather_omet(cfg, output_dir)
 
     pd.concat([omet_df, solar_df], axis=1).to_csv(output_dir/"input_data.csv")
     print(f"Combined input data saved -> {output_dir/'input_data.csv'}")
