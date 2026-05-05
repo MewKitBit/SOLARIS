@@ -22,10 +22,8 @@ def fetch_solar_data(latitude: float, longitude: float, timezone: str, initial_d
              localised to ``timezone``. Returns an empty DataFrame if the PVGIS request fails.
     """
 
-    weather = pd.DataFrame()
-
     try:
-        weather, inputs = pvlib.iotools.get_pvgis_hourly(
+        data, metadata = pvlib.iotools.get_pvgis_hourly(
             latitude=latitude,
             longitude=longitude,
             start=initial_date.year,
@@ -37,9 +35,9 @@ def fetch_solar_data(latitude: float, longitude: float, timezone: str, initial_d
         )
     except Exception as e:
         print(f"Error fetching data from PVGIS: {e}")
-        return weather
+        return pd.DataFrame()
 
-    weather.index = weather.index.tz_convert(timezone)
-    weather = weather.loc[initial_date:final_date]
+    data.index = data.index.tz_convert(timezone)
+    weather = data.loc[initial_date.tz_localize(timezone):final_date.tz_localize(timezone)]
 
     return weather
