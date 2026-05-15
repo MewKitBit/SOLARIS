@@ -1,7 +1,7 @@
 import pvlib.irradiance
 
 from enums import TemperatureModel, SingleDiodeMethod, IncidentAngleModel
-from pandas import DataFrame
+from pandas import DataFrame, concat
 from pvlib import pvsystem, temperature, iam
 
 def __operate_effective_irradiance(module_params, env_params, solar_positions, iam_model):
@@ -111,13 +111,7 @@ def __operate_cec(module_params: dict, env_params: DataFrame, solar_positions: D
         Adjust=module_params['Adjust']
     )
 
-    i_v_curve = pvsystem.singlediode(
-        photocurrent=I_l,
-        saturation_current=I_0,
-        resistance_series=R_s,
-        resistance_shunt=R_sh,
-        nNsVth=nNsVth,
-        method=method
-    )
+    params_df = concat([I_l, I_0, R_s, R_sh, nNsVth], axis=1)
+    params_df.columns = ['I_L', 'I_0', 'R_s', 'R_sh', 'nNsVth']
 
-    return i_v_curve
+    return params_df
