@@ -33,7 +33,7 @@ def _gather_omet(cfg: dict, output_dir: Path) -> pd.DataFrame:
     df.index += pd.Timedelta(minutes=10)
     out = output_dir/"meteorology.csv"
     df.to_csv(out)
-    print(f"Precipitation & pressure saved -> {out}")
+    print(f"Precipitation, pressure, & humidity saved -> {out}")
     return df
 
 
