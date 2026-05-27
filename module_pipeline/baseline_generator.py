@@ -1,10 +1,10 @@
 import pvlib.irradiance
 
-from enums import TemperatureModel, SingleDiodeMethod, IncidentAngleModel
+from enums import TemperatureModel, IncidentAngleModel
 from pandas import DataFrame, concat
 from pvlib import pvsystem, temperature, iam
 
-def __operate_effective_irradiance(module_params, env_params, solar_positions, iam_model):
+def _operate_effective_irradiance(module_params, env_params, solar_positions, iam_model):
     """
     Calculates the effective irradiance reaching the solar cells by applying beam and diffuse
     Incidence Angle Modifiers (IAM) based on the specified physical model.
@@ -48,7 +48,7 @@ def __operate_effective_irradiance(module_params, env_params, solar_positions, i
             env_params['poa_sky_diffuse'] * iam_diffuse['sky'] +
             env_params['poa_ground_diffuse'] * iam_diffuse['ground'])
 
-def __operate_cell_temperature(temp_model: TemperatureModel, env_params):
+def _operate_cell_temperature(temp_model: TemperatureModel, env_params):
     """
     Calculates the operating cell temperature based on ambient environmental conditions
     and the thermal characteristics of the module's mounting structure.
@@ -77,7 +77,7 @@ def __operate_cell_temperature(temp_model: TemperatureModel, env_params):
             **temp_model.value
         )
 
-def __operate_cec(module_params: dict, env_params: DataFrame, solar_positions: DataFrame, method: SingleDiodeMethod,
+def _operate_cec(module_params: dict, env_params: DataFrame, solar_positions: DataFrame,
                   temp_model: TemperatureModel, iam_model:  IncidentAngleModel) -> DataFrame:
     """
     Executes the complete California Energy Commission (CEC) single-diode pipeline to generate
@@ -89,7 +89,6 @@ def __operate_cec(module_params: dict, env_params: DataFrame, solar_positions: D
                           ``R_sh_ref``, ``R_s``, ``Adjust``).
     :param env_params: ``pd.DataFrame`` containing weather and Plane of Array (POA) irradiances.
     :param solar_positions: ``pd.DataFrame`` containing the time-series geometric solar positions.
-    :param method: ``SingleDiodeMethod`` enum specifying the mathematical solver for the single-diode equation.
     :param temp_model: ``TemperatureModel`` enum for the cell temperature estimation.
     :param iam_model: ``IncidentAngleModel`` enum for the effective irradiance estimation.
     :return: ``pd.DataFrame`` containing the calculated five parameters (I_L, I_0, R_s, R_sh, nNsVth)
