@@ -95,8 +95,8 @@ def _operate_cec(module_params: dict, env_params: DataFrame, solar_positions: Da
              and the resulting primary I-V points (i_sc, v_oc, i_mp, v_mp, p_mp, i_x, i_xx) as a time-series.
     """
 
-    effective_irradiance = __operate_effective_irradiance(module_params, env_params, solar_positions, iam_model)
-    temp_cell = __operate_cell_temperature(temp_model, env_params)
+    effective_irradiance = _operate_effective_irradiance(module_params, env_params, solar_positions, iam_model)
+    temp_cell = _operate_cell_temperature(temp_model, env_params)
 
     I_l, I_0, R_s, R_sh, nNsVth = pvsystem.calcparams_cec(
         effective_irradiance=effective_irradiance,
