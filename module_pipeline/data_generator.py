@@ -1,10 +1,10 @@
 import pvlib.irradiance
 
-from enums import TemperatureModel, IncidentAngleModel
-from pandas import DataFrame, concat
+from enums import TemperatureModel, IncidentAngleModel, SingleDiodeMethod
+from pandas import DataFrame, MultiIndex, Series
 from pvlib import pvsystem, temperature, iam
 
-def _operate_effective_irradiance(module_params, env_params, solar_positions, iam_model):
+def _operate_effective_irradiance(module_params, env_params, solar_positions, iam_model) -> Series:
     """
     Calculates the effective irradiance reaching the solar cells by applying beam and diffuse
     Incidence Angle Modifiers (IAM) based on the specified physical model.
@@ -48,7 +48,7 @@ def _operate_effective_irradiance(module_params, env_params, solar_positions, ia
             env_params['poa_sky_diffuse'] * iam_diffuse['sky'] +
             env_params['poa_ground_diffuse'] * iam_diffuse['ground'])
 
-def _operate_cell_temperature(temp_model: TemperatureModel, env_params):
+def _operate_cell_temperature(temp_model: TemperatureModel, env_params) -> Series:
     """
     Calculates the operating cell temperature based on ambient environmental conditions
     and the thermal characteristics of the module's mounting structure.
@@ -77,11 +77,18 @@ def _operate_cell_temperature(temp_model: TemperatureModel, env_params):
             **temp_model.value
         )
 
-def _operate_cec(module_params: dict, env_params: DataFrame, solar_positions: DataFrame,
-                  temp_model: TemperatureModel, iam_model:  IncidentAngleModel) -> DataFrame:
+def operate_cec(module_params: dict, env_params: DataFrame, solar_positions: DataFrame, temp_model: TemperatureModel,
+                iam_model:  IncidentAngleModel, num_panels: int) -> DataFrame:
     """
-    Executes the complete California Energy Commission (CEC) single-diode pipeline to generate
-    the operational I-V curve parameters for a specific PV module over time.
+    Executes the complete California Energy Commission (CEC) single-diode pipeline across a fleet of panels.
+
+    For each panel: runs ``calcparams_cec`` for the five reference parameters, applies any per-panel
+    failure modifiers to those parameters in-flight, then runs ``singlediode`` (Newton method) for
+    the seven primary I-V points. Only the I-V points are kept in the output; the modified
+    single-diode parameters are intermediate and discarded each iteration. Output is pre-allocated
+    as a long-format ``pd.DataFrame`` indexed by ``(panel_id, timestamp)``; per-panel results are
+    written into contiguous row blocks via ``iloc`` to avoid a final ``concat`` copy. Per-panel
+    iteration is the cache-friendly call pattern at TFG scale; see ``perf_profiler.py``.
 
     :param module_params: Dictionary of the physical and electrical parameters of the module.
                           Must include mounting geometry, IAM glass parameters, and the CEC
@@ -91,26 +98,53 @@ def _operate_cec(module_params: dict, env_params: DataFrame, solar_positions: Da
     :param solar_positions: ``pd.DataFrame`` containing the time-series geometric solar positions.
     :param temp_model: ``TemperatureModel`` enum for the cell temperature estimation.
     :param iam_model: ``IncidentAngleModel`` enum for the effective irradiance estimation.
-    :return: ``pd.DataFrame`` containing the calculated five parameters (I_L, I_0, R_s, R_sh, nNsVth)
-             and the resulting primary I-V points (i_sc, v_oc, i_mp, v_mp, p_mp, i_x, i_xx) as a time-series.
+    :param num_panels: Number of panels in the fleet to simulate.
+    :return: ``pd.DataFrame`` indexed by ``(panel_id, timestamp)`` with seven columns — the primary
+             I-V points (``i_sc``, ``v_oc``, ``i_mp``, ``v_mp``, ``p_mp``, ``i_x``, ``i_xx``).
     """
 
     effective_irradiance = _operate_effective_irradiance(module_params, env_params, solar_positions, iam_model)
     temp_cell = _operate_cell_temperature(temp_model, env_params)
 
-    I_l, I_0, R_s, R_sh, nNsVth = pvsystem.calcparams_cec(
-        effective_irradiance=effective_irradiance,
-        temp_cell=temp_cell,
-        alpha_sc=module_params['alpha_sc'],
-        a_ref=module_params['a_ref'],
-        I_L_ref=module_params['I_L_ref'],
-        I_o_ref=module_params['I_o_ref'],
-        R_sh_ref=module_params['R_sh_ref'],
-        R_s=module_params['R_s'],
-        Adjust=module_params['Adjust']
+    # TODO: Chunkify based on max memory usage set in TOML config file; progressively save to disk
+    # TODO: Parallelize calculations across cores set in TOML config file
+
+    timestamps = effective_irradiance.index
+    num_timesteps = len(timestamps)
+    iv_point_cols = ['i_sc', 'v_oc', 'i_mp', 'v_mp', 'p_mp', 'i_x', 'i_xx']
+    index = MultiIndex.from_product(
+        [range(num_panels), timestamps],
+        names=['panel_id', 'timestamp'],
     )
+    panels = DataFrame(0.0, index=index, columns=iv_point_cols)
 
-    params_df = concat([I_l, I_0, R_s, R_sh, nNsVth], axis=1)
-    params_df.columns = ['I_L', 'I_0', 'R_s', 'R_sh', 'nNsVth']
+    for panel_num in range(num_panels):
+        # TODO: Apply effective irradiance and temp_cell modifiers; from failure_generator.py through orchestrator
 
-    return params_df
+        I_l, I_0, R_s, R_sh, nNsVth = pvsystem.calcparams_cec(
+            effective_irradiance=effective_irradiance,
+            temp_cell=temp_cell,
+            alpha_sc=module_params['alpha_sc'],
+            a_ref=module_params['a_ref'],
+            I_L_ref=module_params['I_L_ref'],
+            I_o_ref=module_params['I_o_ref'],
+            R_sh_ref=module_params['R_sh_ref'],
+            R_s=module_params['R_s'],
+            Adjust=module_params['Adjust']
+        )
+
+        # TODO: Apply failure modifiers to (I_l, I_0, R_s, R_sh); from failure_generator.py through orchestrator
+
+        iv_points = pvsystem.singlediode(
+            photocurrent=I_l,
+            saturation_current=I_0,
+            resistance_series=R_s,
+            resistance_shunt=R_sh,
+            nNsVth=nNsVth,
+            method='newton',
+        )
+
+        start = panel_num * num_timesteps
+        panels.iloc[start:start + num_timesteps] = iv_points[iv_point_cols].values
+
+    return panels
