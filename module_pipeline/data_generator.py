@@ -1,8 +1,8 @@
-import pvlib.irradiance
-
 from enums import TemperatureModel, IncidentAngleModel, SingleDiodeMethod
-from pandas import DataFrame, MultiIndex, Series
-from pvlib import pvsystem, temperature, iam
+from pandas import DataFrame, Index, MultiIndex, NaT, Series
+from pvlib import pvsystem, temperature, iam, irradiance
+
+from .effect_generator import compute_modifiers, get_effect_names
 
 def _operate_effective_irradiance(module_params, env_params, solar_positions, iam_model) -> Series:
     """
@@ -21,7 +21,7 @@ def _operate_effective_irradiance(module_params, env_params, solar_positions, ia
     :return: ``pd.Series`` representing the total effective irradiance (W/m^2) absorbed by the cells.
     """
 
-    aoi = pvlib.irradiance.aoi(
+    aoi = irradiance.aoi(
         surface_azimuth=module_params['surface_azimuth'],
         surface_tilt=module_params['surface_tilt'],
         solar_azimuth=solar_positions['solar_azimuth'],
@@ -77,30 +77,39 @@ def _operate_cell_temperature(temp_model: TemperatureModel, env_params) -> Serie
             **temp_model.value
         )
 
-def operate_cec(module_params: dict, env_params: DataFrame, solar_positions: DataFrame, temp_model: TemperatureModel,
-                iam_model:  IncidentAngleModel, num_panels: int) -> DataFrame:
+def generate_data(module_params: dict, env_params: DataFrame, solar_positions: DataFrame, temp_model: TemperatureModel,
+                iam_model:  IncidentAngleModel, num_panels: int, method: SingleDiodeMethod) -> tuple[DataFrame, DataFrame]:
     """
     Executes the complete California Energy Commission (CEC) single-diode pipeline across a fleet of panels.
 
-    For each panel: runs ``calcparams_cec`` for the five reference parameters, applies any per-panel
-    failure modifiers to those parameters in-flight, then runs ``singlediode`` (Newton method) for
-    the seven primary I-V points. Only the I-V points are kept in the output; the modified
-    single-diode parameters are intermediate and discarded each iteration. Output is pre-allocated
-    as a long-format ``pd.DataFrame`` indexed by ``(panel_id, timestamp)``; per-panel results are
-    written into contiguous row blocks via ``iloc`` to avoid a final ``concat`` copy. Per-panel
-    iteration is the cache-friendly call pattern at TFG scale; see ``perf_profiler.py``.
+    For each panel: runs ``calcparams_cec`` for the five reference parameters, applies the per-panel
+    effect modifiers to the effective irradiance, cell temperature, and those parameters,
+    then runs ``singlediode`` for the seven primary I-V points. Only the I-V points are kept in the
+    observables output, the modified single-diode parameters are intermediate and discarded each iteration.
+    Observables are pre-allocated as a long-format ``pd.DataFrame`` indexed by ``(panel_id, timestamp)``.
+    Per-panel results are written into contiguous row blocks via ``iloc`` to avoid a final ``concat`` copy.
+    Per-panel iteration is the cache-friendly call pattern at this project's scale.
 
-    :param module_params: Dictionary of the physical and electrical parameters of the module.
-                          Must include mounting geometry, IAM glass parameters, and the CEC
-                          reference parameters (``alpha_sc``, ``a_ref``, ``I_L_ref``, ``I_o_ref``,
-                          ``R_sh_ref``, ``R_s``, ``Adjust``).
+    A sibling attribution ``DataFrame`` is built alongside the observables: one row per panel, one
+    column per registered effect (named ``{effect_name}_onset``). Cells hold the timestamp at which
+    the effect triggered on that panel, or ``pd.NaT`` if it never triggered within the simulated
+    horizon. The attribution frame is small (one row per panel) and is written as a sidecar parquet
+    next to the observables.
+
+    :param module_params: dictionary of the physical and electrical parameters of the module. Must
+                          include mounting geometry, IAM glass parameters, and the CEC reference
+                          parameters (``alpha_sc``, ``a_ref``, ``I_L_ref``, ``I_o_ref``, ``R_sh_ref``,
+                          ``R_s``, ``Adjust``).
     :param env_params: ``pd.DataFrame`` containing weather and Plane of Array (POA) irradiances.
     :param solar_positions: ``pd.DataFrame`` containing the time-series geometric solar positions.
     :param temp_model: ``TemperatureModel`` enum for the cell temperature estimation.
     :param iam_model: ``IncidentAngleModel`` enum for the effective irradiance estimation.
-    :param num_panels: Number of panels in the fleet to simulate.
-    :return: ``pd.DataFrame`` indexed by ``(panel_id, timestamp)`` with seven columns — the primary
-             I-V points (``i_sc``, ``v_oc``, ``i_mp``, ``v_mp``, ``p_mp``, ``i_x``, ``i_xx``).
+    :param num_panels: number of panels in the fleet to simulate.
+    :param method: ``SingleDiodeMethod`` enum selecting the ``singlediode`` resolution method.
+    :return: tuple ``(observables, attribution)``. ``observables`` is indexed by
+             ``(panel_id, timestamp)`` with seven I-V point columns (``i_sc``, ``v_oc``, ``i_mp``,
+             ``v_mp``, ``p_mp``, ``i_x``, ``i_xx``). ``attribution`` is indexed by ``panel_id``
+             with one ``{effect_name}_onset`` column per registered effect.
     """
 
     effective_irradiance = _operate_effective_irradiance(module_params, env_params, solar_positions, iam_model)
@@ -111,19 +120,29 @@ def operate_cec(module_params: dict, env_params: DataFrame, solar_positions: Dat
 
     timestamps = effective_irradiance.index
     num_timesteps = len(timestamps)
+
     iv_point_cols = ['i_sc', 'v_oc', 'i_mp', 'v_mp', 'p_mp', 'i_x', 'i_xx']
-    index = MultiIndex.from_product(
-        [range(num_panels), timestamps],
-        names=['panel_id', 'timestamp'],
-    )
+    index = MultiIndex.from_product([range(num_panels), timestamps], names=['panel_id', 'timestamp'])
     panels = DataFrame(0.0, index=index, columns=iv_point_cols)
 
+    effect_names = get_effect_names()
+    attribution = DataFrame(
+        NaT,
+        index=Index(range(num_panels), name='panel_id'),
+        columns=[f"{name}_onset" for name in effect_names],
+        dtype=timestamps.dtype,
+    )
+
     for panel_num in range(num_panels):
-        # TODO: Apply effective irradiance and temp_cell modifiers; from failure_generator.py through orchestrator
+        modifiers, onsets = compute_modifiers(panel_num)
+
+        # Apply effective irradiance and temp_cell modifiers
+        panel_irr = effective_irradiance * modifiers.get('G', 1.0)
+        panel_temp = temp_cell + modifiers.get('T', 0.0)
 
         I_l, I_0, R_s, R_sh, nNsVth = pvsystem.calcparams_cec(
-            effective_irradiance=effective_irradiance,
-            temp_cell=temp_cell,
+            effective_irradiance=panel_irr,
+            temp_cell=panel_temp,
             alpha_sc=module_params['alpha_sc'],
             a_ref=module_params['a_ref'],
             I_L_ref=module_params['I_L_ref'],
@@ -133,7 +152,11 @@ def operate_cec(module_params: dict, env_params: DataFrame, solar_positions: Dat
             Adjust=module_params['Adjust']
         )
 
-        # TODO: Apply failure modifiers to (I_l, I_0, R_s, R_sh); from failure_generator.py through orchestrator
+        I_l  = I_l * modifiers.get('I_L',  1.0)
+        I_0  = I_0 * modifiers.get('I_0',  1.0)
+        R_s  = R_s * modifiers.get('R_s',  1.0)
+        R_sh = R_sh * modifiers.get('R_sh', 1.0)
+        nNsVth = nNsVth * modifiers.get('nNsVth', 1.0)
 
         iv_points = pvsystem.singlediode(
             photocurrent=I_l,
@@ -141,10 +164,13 @@ def operate_cec(module_params: dict, env_params: DataFrame, solar_positions: Dat
             resistance_series=R_s,
             resistance_shunt=R_sh,
             nNsVth=nNsVth,
-            method='newton',
+            method=method,
         )
 
         start = panel_num * num_timesteps
         panels.iloc[start:start + num_timesteps] = iv_points[iv_point_cols].values
 
-    return panels
+        for effect_name, onset_step in onsets.items():
+            attribution.at[panel_num, f"{effect_name}_onset"] = timestamps[onset_step]
+
+    return panels, attribution

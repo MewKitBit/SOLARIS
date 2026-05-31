@@ -6,12 +6,19 @@ class AbstractBaselineFailure(ABC):
     Abstract contract for failure modes.
 
     Subclasses encapsulate their own acceleration math, statistical onset distribution, and progression dynamics.
-    The base class only declares the interface that ``failure_injection.operate_module_modifiers`` consumes.
+    The base class only declares the interface that ``effect_generator.compute_modifiers`` consumes.
+
+    Subclasses must override ``affected_columns`` with a tuple of the column names their
+    ``compute_progression`` returns. ``effect_generator.validate_effects`` reads this
+    declaration at startup to verify only valid axes (members of ``VALID_PARAMS``) are
+    claimed; the runtime composition path trusts the declaration without re-checking.
 
     :param name: short identifier used as the failure column group inside the per-panel DataFrame.
     :param env_params: ``pd.DataFrame`` of environmental conditions indexed by the simulation time axis.
     :param module_params: optional dict of static panel parameters that some subclasses may consult.
     """
+
+    affected_columns: tuple[str, ...] = ()
 
     def __init__(self, name: str, env_params: DataFrame, module_params: dict | None = None):
         self.name = name
