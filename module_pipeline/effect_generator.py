@@ -5,7 +5,16 @@ from numpy.typing import NDArray
 from .failure_types.abstract_baseline_failure import AbstractBaselineFailure
 
 
-VALID_PARAMS: tuple[str, ...] = ('I_L', 'I_0', 'R_s', 'R_sh', 'nNsVth', 'G', 'T')
+# Per-axis composition rule applied by ``compute_modifiers`` when overlapping effects touch the same axis.
+AGGREGATION_RULES: dict[str, str] = {
+    'G':    'multiplicative',
+    'I_L':  'multiplicative',
+    'R_sh': 'multiplicative',
+    'T':    'additive',
+    'R_s':  'additive',
+    'I_0':  'additive',
+}
+VALID_PARAMS: tuple[str, ...] = tuple(AGGREGATION_RULES.keys())
 _effects: tuple[AbstractBaselineFailure, ...] = ()
 _master_seed: int = 0
 _num_timesteps: int = 0
@@ -90,16 +99,22 @@ def compute_modifiers(panel_num: int) -> tuple[dict[str, NDArray[np.float64]], d
     For each registered effect, samples the onset step from a hierarchical RNG seeded on
     ``(master_seed, panel_num, effect_index)``. If onset falls within the simulated
     horizon, pulls the per-effect progression DataFrame from ``compute_progression`` and
-    composes its column values onto a per-axis running factor array. Progression values
-    are interpreted as fractional reductions (``0.3`` means "30% reduction at this step");
-    the factor written into the modifier dict is therefore ``(1 - reduction)``, and
-    overlapping effects on the same axis compound multiplicatively.
+    composes its column values onto a per-axis running array, dispatching by axis on
+    ``AGGREGATION_RULES``:
 
-    Modifier dict keys are a subset of ``VALID_PARAMS`` covering the axes that registered
-    effects actually touched on this panel. Each value is a full-length ``float64`` array
-    padded with ``1.0`` (multiplicative identity) before onset. Axes that no effect
-    touched are absent from the dict entirely, so the consumer's ``.get(key, 1.0)`` falls
-    through to a free scalar broadcast.
+    - **Multiplicative axes** (``G``, ``I_L``, ``R_sh``): progression values are
+      fractional reductions ``r in [0, 1]``. The running array starts at the
+      multiplicative identity ``1.0`` and accumulates as ``Pi(1 - r_i)`` across
+      overlapping effects. The consumer applies it as ``baseline * factor``.
+    - **Additive axes** (``T``, ``R_s``, ``I_0``): progression values are physical-
+      quantity deltas (degrees C for ``T``, ohms for ``R_s``, amps for ``I_0``). The
+      running array starts at the additive identity ``0.0`` and accumulates as
+      ``Sigma delta_i``. The consumer applies it as ``baseline + delta``.
+
+    Modifier dict keys are a subset of ``VALID_PARAMS`` covering the axes that
+    registered effects actually touched on this panel. Axes that no effect touched are
+    absent from the dict entirely, so the consumer's ``.get(key, 1.0)`` (or
+    ``.get(key, 0.0)`` for additive axes) falls through to a free scalar broadcast.
 
     Onset dict maps effect ``name`` to the onset step index for effects that did trigger
     on this panel; effects that never triggered are absent.
@@ -120,11 +135,17 @@ def compute_modifiers(panel_num: int) -> tuple[dict[str, NDArray[np.float64]], d
             onsets[effect.name] = onset
 
             for column in progression.columns:
-                reduction_segment = progression[column].to_numpy()
-                if column not in modifiers:
-                    modifiers[column] = np.ones(_num_timesteps, dtype=np.float64)
-                # TODO: Figure out the best way of aggregating
-                modifiers[column][onset:_num_timesteps] *= (1.0 - reduction_segment)
+                segment = progression[column].to_numpy()
+                rule = AGGREGATION_RULES[column]
+
+                if rule == 'multiplicative':
+                    if column not in modifiers:
+                        modifiers[column] = np.ones(_num_timesteps, dtype=np.float64)
+                    modifiers[column][onset:_num_timesteps] *= (1.0 - segment)
+                else:
+                    if column not in modifiers:
+                        modifiers[column] = np.zeros(_num_timesteps, dtype=np.float64)
+                    modifiers[column][onset:_num_timesteps] += segment
 
     return modifiers, onsets
 

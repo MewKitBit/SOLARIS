@@ -42,15 +42,25 @@ class AbstractBaselineFailure(ABC):
         Compute the per-step modifier progression from ``start_step`` to ``end_step``.
 
         The returned DataFrame is indexed by ``env_params.index[start_step:end_step]``
-        and carries one to five columns whose names are a subset of ``IV_PARAMS``.
-        Single-axis failures return a one-column DataFrame; multi-axis failures (e.g.
-        microcracks affecting both ``R_s`` and ``I_L``) return additional columns.
-        Modifier values are fractional relative to the baseline I-V parameters.
+        and carries one or more columns whose names are a subset of ``VALID_PARAMS``
+        (defined in ``effect_generator``). Single-axis failures return a one-column
+        DataFrame; multi-axis failures return additional columns.
+
+        Column-value semantics are axis-dependent, per the composition rules in
+        ``effect_generator``:
+
+        - Multiplicative axes (``G``, ``I_L``, ``R_sh``): values are fractional
+          reductions ``r in [0, 1]``; ``0.3`` means "30% loss at this step",
+          ``0.0`` means "no loss".
+        - Additive axes (``T``, ``R_s``, ``I_0``): values are physical-quantity
+          deltas in the axis' native unit (degrees C for ``T``, ohms for ``R_s``,
+          amps for ``I_0``); ``0.0`` means "no effect".
 
         :param seed: integer seed derived for this panel from the master RNG.
         :param start_step: inclusive step index at which the progression begins, as
                            returned by ``compute_time_to_onset``.
         :param end_step: exclusive step index marking the end of the simulated horizon.
-        :return: ``pd.DataFrame`` whose columns form a non-empty subset of ``IV_PARAMS``.
+        :return: ``pd.DataFrame`` whose columns form a non-empty subset of
+                 ``VALID_PARAMS``.
         """
         pass

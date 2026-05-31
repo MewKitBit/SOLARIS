@@ -152,11 +152,11 @@ def generate_data(module_params: dict, env_params: DataFrame, solar_positions: D
             Adjust=module_params['Adjust']
         )
 
+        # Additive or multiplicative according to AGGREGATION_RULES (effect_generator)
         I_l  = I_l * modifiers.get('I_L',  1.0)
-        I_0  = I_0 * modifiers.get('I_0',  1.0)
-        R_s  = R_s * modifiers.get('R_s',  1.0)
+        I_0 = I_0 + modifiers.get('I_0', 0.0)
+        R_s = R_s + modifiers.get('R_s', 0.0)
         R_sh = R_sh * modifiers.get('R_sh', 1.0)
-        nNsVth = nNsVth * modifiers.get('nNsVth', 1.0)
 
         iv_points = pvsystem.singlediode(
             photocurrent=I_l,
