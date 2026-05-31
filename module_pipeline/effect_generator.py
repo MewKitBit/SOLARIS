@@ -45,25 +45,35 @@ def configure(effects, master_seed: int, num_timesteps: int) -> None:
 
 def validate_effects() -> None:
     """
-    Validates that every registered effect declares its ``affected_columns`` and that the
-    declaration refers only to axes listed in ``VALID_PARAMS``. Intended to be called
-    from ``main.py`` immediately after ``configure`` so contract violations surface in
-    seconds at startup rather than mid-simulation.
+    Validates that every registered effect declares its ``affected_columns`` (using only
+    axes listed in ``VALID_PARAMS``) and that no two effects share the same ``name``.
+    Intended to be called from ``main.py`` immediately after ``configure`` so contract
+    violations surface in seconds at startup rather than mid-simulation.
 
     Reads each effect's class-level ``affected_columns`` attribute directly; no
     ``compute_progression`` call is involved. The runtime composition path in
     ``compute_modifiers`` trusts the declared columns without re-checking, so this
-    startup pass is the only line of defense against typo'd or invalid declarations.
+    startup pass is the only line of defense against typoed or invalid declarations.
 
-    Collects every offending ``(effect, problem)`` pair across all registered effects and
-    raises a single ``ValueError`` listing them together, so a researcher sees all issues
-    at once rather than fixing one and re-running to find the next.
+    Duplicate-name checks catch the case where two effect instances share an
+    attribution-column identifier and would collide on the ``{name}_onset`` sidecar
+    column when ``data_generator`` writes per-panel onsets.
 
-    :raises ValueError: when any registered effect declares no ``affected_columns`` or
-                        declares a column not in ``VALID_PARAMS``.
+    Collects every offending entry across all registered effects and raises a single
+    ``ValueError`` listing them together, so a researcher sees all issues at once rather
+    than fixing one and re-running to find the next.
+
+    :raises ValueError: when any registered effect declares no ``affected_columns``,
+                        declares a column not in ``VALID_PARAMS``, or shares a ``name``
+                        with another registered effect.
     """
 
     errors: list[str] = []
+
+    names = [effect.name for effect in _effects]
+    for duplicate in sorted({n for n in names if names.count(n) > 1}):
+        errors.append(f"'{duplicate}' is the name of multiple effects")
+
     for effect in _effects:
         if not effect.affected_columns:
             errors.append(f"'{effect.name}' declares no affected_columns")

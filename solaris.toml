@@ -1,0 +1,55 @@
+# solaris.toml — simulation config consumed by main.py.
+#
+# Separate from meteorology_helpers/config.toml, which drives the upstream data
+# gather step. This file drives the simulation itself, assuming the intake CSV
+# has already been written by the gather step.
+
+[runtime]
+master_seed   = 42 # root entropy for per-panel-per-effect RNG seeding
+num_panels    = 1000 # total fleet size
+memory_cap_gb = 8.0 # main.py converts to chunk_size given num_timesteps
+num_workers   = 1 # 1 = single-core; >1 = multiprocessing.Pool size
+
+[paths]
+intake_file = "input_data/input_data.csv" # output of meteorology_helpers/gather_data.py -c
+output_dir  = "output/" # chunked parquet files written here
+
+[singlediode]
+method = "newton" # one of SingleDiodeMethod enum values
+
+[temperature]
+model = "SAPM_OPEN_RACK_GLASS" # one of TemperatureModel enum values
+
+[incident_angle]
+model = "PHYSICAL" # one of IncidentAngleModel enum values
+# Per-model glass parameters; only the set matching `model` is consumed.
+n = 1.526 # PHYSICAL: refractive index
+K = 4.0 # PHYSICAL: glazing extinction coefficient (1/m)
+L = 0.002 # PHYSICAL: glazing thickness (m)
+# b   = 0.05 # ASHRAE
+# a_r = 0.16 # MARTIN_RUIZ
+
+[module]
+# CEC single-diode reference parameters; sourced from the CEC module database
+# entry for the modelled panel.
+alpha_sc = 0.0042
+a_ref    = 1.6816
+I_L_ref  = 9.66
+I_o_ref  = 5.94e-11
+R_sh_ref = 480.5
+R_s      = 0.39383
+Adjust   = 11.4
+
+[module.mounting]
+surface_tilt    = 30.0 # degrees from horizontal
+surface_azimuth = 180.0 # degrees clockwise from north
+
+# Effects are nested arrays of tables: one outer key per concrete failure class
+# (matching its `type` class attribute, e.g. `pid`), one inner entry per
+# registered instance of that class. The instance's `name` becomes its
+# attribution column prefix and must be unique across all effects (enforced by
+# effect_generator.validate_effects).
+# [[effects.pid]]
+# name                   = "pid"
+# beta                   = 1.5 # Weibull shape parameter
+# eta_hours              = 50000.0 # Weibull scale parameter (effective stress hours)
