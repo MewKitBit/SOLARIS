@@ -52,6 +52,10 @@ def fetch_solar_data(latitude: float, longitude: float, timezone: str, initial_d
     data['solar_azimuth'] = solar_position['azimuth']
     data['poa_global'] = data['poa_direct'] + data['poa_sky_diffuse'] + data['poa_ground_diffuse']
 
-    data = data.loc[initial_date:final_date]
+    # final_date is midnight at the start of the last requested day; extend the upper bound to
+    # the end of that day so the inclusive slice keeps it whole, matching fetch_omet's
+    # whole-day string slice. Without this, the last day's solar columns come back empty.
+    inclusive_end = final_date + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+    data = data.loc[initial_date:inclusive_end]
 
     return data
