@@ -1,8 +1,9 @@
-from enums import TemperatureModel, IncidentAngleModel, SingleDiodeMethod
 from pandas import DataFrame, Index, MultiIndex, NaT, Series
 from pvlib import pvsystem, temperature, iam, irradiance
 
 from .effect_generator import compute_modifiers, get_effect_names
+from .enums import TemperatureModel, IncidentAngleModel, SingleDiodeMethod
+
 
 def _operate_effective_irradiance(module_params, env_params, solar_positions, iam_model) -> Series:
     """
@@ -164,7 +165,7 @@ def generate_data(module_params: dict, env_params: DataFrame, solar_positions: D
             resistance_series=R_s,
             resistance_shunt=R_sh,
             nNsVth=nNsVth,
-            method=method,
+            method=method.value,
         )
 
         start = panel_num * num_timesteps
