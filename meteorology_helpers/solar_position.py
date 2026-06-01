@@ -52,6 +52,6 @@ def fetch_solar_data(latitude: float, longitude: float, timezone: str, initial_d
     data['solar_azimuth'] = solar_position['azimuth']
     data['poa_global'] = data['poa_direct'] + data['poa_sky_diffuse'] + data['poa_ground_diffuse']
 
-    weather = data.loc[initial_date.tz_localize(timezone):final_date.tz_localize(timezone)]
+    data = data.loc[initial_date:final_date]
 
-    return weather
+    return data
