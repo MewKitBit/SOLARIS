@@ -55,10 +55,6 @@ def validate_effects() -> None:
     ``compute_modifiers`` trusts the declared columns without re-checking, so this
     startup pass is the only line of defense against typoed or invalid declarations.
 
-    Duplicate-name checks catch the case where two effect instances share an
-    attribution-column identifier and would collide on the ``{name}_onset`` sidecar
-    column when ``data_generator`` writes per-panel onsets.
-
     Collects every offending entry across all registered effects and raises a single
     ``ValueError`` listing them together, so a researcher sees all issues at once rather
     than fixing one and re-running to find the next.
@@ -69,10 +65,6 @@ def validate_effects() -> None:
     """
 
     errors: list[str] = []
-
-    names = [effect.name for effect in _effects]
-    for duplicate in sorted({n for n in names if names.count(n) > 1}):
-        errors.append(f"'{duplicate}' is the name of multiple effects")
 
     for effect in _effects:
         if not effect.affected_columns:
