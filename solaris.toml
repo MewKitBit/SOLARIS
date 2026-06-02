@@ -1,8 +1,12 @@
-# solaris.toml — simulation config consumed by main.py.
-#
-# Separate from meteorology_helpers/config.toml, which drives the upstream data
-# gather step. This file drives the simulation itself, assuming the intake CSV
-# has already been written by the gather step.
+# solaris.toml — unified config for the SOLARIS project.
+[location]
+latitude  = 43.4636 # decimal degrees, positive = north
+longitude = 3.8226 # decimal degrees, positive = east
+timezone  = "UTC" # IANA timezone; localises the gathered DatetimeIndex
+
+[period]
+start_date = "2020-01-01" # ISO 8601 date, inclusive
+end_date   = "2020-12-31" # ISO 8601 date, inclusive
 
 [runtime]
 master_seed   = 42 # root entropy for per-panel-per-effect RNG seeding
@@ -40,7 +44,8 @@ R_sh_ref = 480.5
 R_s      = 0.39383
 Adjust   = 11.4
 
-[module.mounting]
+[mounting]
+# Array orientation
 surface_tilt    = 30.0 # degrees from horizontal
 surface_azimuth = 180.0 # degrees clockwise from north
 
