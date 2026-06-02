@@ -79,7 +79,7 @@ def _operate_cell_temperature(temp_model: TemperatureModel, env_params) -> Serie
         )
 
 def generate_data(module_params: dict, env_params: DataFrame, solar_positions: DataFrame, temp_model: TemperatureModel,
-                iam_model:  IncidentAngleModel, num_panels: int, method: SingleDiodeMethod) -> tuple[DataFrame, DataFrame]:
+                iam_model:  IncidentAngleModel, panel_ids: range, method: SingleDiodeMethod) -> tuple[DataFrame, DataFrame]:
     """
     Executes the complete California Energy Commission (CEC) single-diode pipeline across a fleet of panels.
 
@@ -105,7 +105,8 @@ def generate_data(module_params: dict, env_params: DataFrame, solar_positions: D
     :param solar_positions: ``pd.DataFrame`` containing the time-series geometric solar positions.
     :param temp_model: ``TemperatureModel`` enum for the cell temperature estimation.
     :param iam_model: ``IncidentAngleModel`` enum for the effective irradiance estimation.
-    :param num_panels: number of panels in the fleet to simulate.
+    :param panel_ids: ``range`` of global panel ids to simulate in this call. Global rather than
+                      chunk-local so the per-(panel, effect) RNG seeds stay unique across chunks.
     :param method: ``SingleDiodeMethod`` enum selecting the ``singlediode`` resolution method.
     :return: tuple ``(observables, attribution)``. ``observables`` is indexed by
              ``(panel_id, timestamp)`` with seven I-V point columns (``i_sc``, ``v_oc``, ``i_mp``,
@@ -116,25 +117,24 @@ def generate_data(module_params: dict, env_params: DataFrame, solar_positions: D
     effective_irradiance = _operate_effective_irradiance(module_params, env_params, solar_positions, iam_model)
     temp_cell = _operate_cell_temperature(temp_model, env_params)
 
-    # TODO: Chunkify based on max memory usage set in TOML config file; progressively save to disk
-    # TODO: Parallelize calculations across cores set in TOML config file
-
     timestamps = effective_irradiance.index
     num_timesteps = len(timestamps)
 
     iv_point_cols = ['i_sc', 'v_oc', 'i_mp', 'v_mp', 'p_mp', 'i_x', 'i_xx']
-    index = MultiIndex.from_product([range(num_panels), timestamps], names=['panel_id', 'timestamp'])
+    index = MultiIndex.from_product([panel_ids, timestamps], names=['panel_id', 'timestamp'])
     panels = DataFrame(0.0, index=index, columns=iv_point_cols)
 
     effect_names = get_effect_names()
     attribution = DataFrame(
         NaT,
-        index=Index(range(num_panels), name='panel_id'),
+        # Materialized, not Index(panel_ids): a range yields a RangeIndex, which is metadata-only
+        # and is lost on a parquet round-trip when there are no effect columns to anchor it.
+        index=Index(list(panel_ids), name='panel_id'),
         columns=[f"{name}_onset" for name in effect_names],
         dtype=timestamps.dtype,
     )
 
-    for panel_num in range(num_panels):
+    for local_idx, panel_num in enumerate(panel_ids):
         modifiers, onsets = compute_modifiers(panel_num)
 
         # Apply effective irradiance and temp_cell modifiers
@@ -168,7 +168,7 @@ def generate_data(module_params: dict, env_params: DataFrame, solar_positions: D
             method=method.value,
         )
 
-        start = panel_num * num_timesteps
+        start = local_idx * num_timesteps
         panels.iloc[start:start + num_timesteps] = iv_points[iv_point_cols].values
 
         for effect_name, onset_step in onsets.items():
