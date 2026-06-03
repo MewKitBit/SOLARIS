@@ -19,10 +19,10 @@ intake_file = "input_data/input_data.csv" # output of meteorology_helpers/gather
 output_dir  = "output/" # chunked parquet files written here
 
 [singlediode]
-method = "newton" # one of SingleDiodeMethod enum values
+method = "NEWTON" # one of SingleDiodeMethod enum members
 
 [temperature]
-model = "SAPM_OPEN_RACK_GLASS" # one of TemperatureModel enum values
+model = "SAPM_OPEN_RACK_GLASS" # one of TemperatureModel enum members
 
 [incident_angle]
 model = "PHYSICAL" # one of IncidentAngleModel enum values
