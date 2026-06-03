@@ -1,8 +1,12 @@
 import argparse
 
+from pandas import DataFrame, read_csv
+from pathlib import Path
+
+from module_pipeline import effect_generator
+from module_pipeline.data_generator import generate_data
 from module_pipeline.enums import IncidentAngleModel, SingleDiodeMethod, TemperatureModel
 from module_pipeline.failure_types import FAILURE_CLASSES
-from pathlib import Path
 
 # Workaround to tomllib not being included in Python versions under 3.11
 try:
@@ -10,13 +14,172 @@ try:
 except ImportError:
     import tomli as tomllib
 
+# IAM glass parameters consumed per incident-angle model; the chosen model's set must be present.
+_IAM_GLASS_PARAMS = {'PHYSICAL': ('n', 'K', 'L'), 'ASHRAE': ('b',), 'MARTIN_RUIZ': ('a_r',)}
+
 
 def orchestrator(config: dict) -> None:
-    # TODO: Load environmental and solar data from cfg pointed file
-    # TODO: Configure effect generator by passing relevant data
-    # TODO: Validate loaded effects from effect generator
-    # TODO: Run data generator with chunking and parallelization as per cfg
-    pass
+    """
+    Runs the full simulation from a validated config: loads the inputs, builds and configures the
+    effects, then drives ``generate_data`` over memory-capped chunks, writing each chunk's
+    observables and attribution frames to parquet under ``[paths] output_dir``.
+
+    Assumes ``config`` has already passed ``validate_config_file``. Single-core for now; chunks are
+    independent units of work, so parallelizing across ``[runtime] num_workers`` is a later drop-in.
+
+    :param config: parsed and validated TOML config.
+    """
+
+    runtime = config['runtime']
+
+    env_params, solar_positions = _load_inputs(config['paths']['intake_file'])
+    num_timesteps = len(env_params)
+
+    module_params = _build_module_params(config)
+    temp_model = TemperatureModel[config['temperature']['model']]
+    iam_model = IncidentAngleModel[config['incident_angle']['model']]
+    method = SingleDiodeMethod[config['singlediode']['method'].upper()]
+
+    effects = _build_effects(config, env_params)
+    effect_generator.configure(effects, runtime['master_seed'], num_timesteps)
+    effect_generator.validate_effects()
+
+    output_dir = Path(config['paths']['output_dir'])
+    # Observables and attribution each get their own subdirectory so each is a single-schema
+    # parquet dataset a consumer can read whole with read_parquet(dir); mixing them in one
+    # directory would unify their differing schemas and corrupt the read.
+    observables_dir = output_dir / 'observables'
+    attribution_dir = output_dir / 'attribution'
+    observables_dir.mkdir(parents=True, exist_ok=True)
+    attribution_dir.mkdir(parents=True, exist_ok=True)
+
+    chunk_size = _compute_chunk_size(runtime['memory_cap_gb'], num_timesteps)
+    chunks = _chunk_ranges(runtime['num_panels'], chunk_size)
+
+    # TODO: parallelize chunks across runtime['num_workers'] cores; single-core for now.
+    for panel_ids in chunks:
+        observables, attribution = generate_data(
+            module_params, env_params, solar_positions, temp_model, iam_model, panel_ids, method,
+        )
+        _write_chunk(observables_dir, attribution_dir, panel_ids, observables, attribution)
+
+
+def _load_inputs(intake_file: str) -> tuple[DataFrame, DataFrame]:
+    """
+    Reads the intake CSV and splits it into the two frames ``generate_data`` consumes.
+
+    The intake file is produced by ``meteorology_helpers/gather_data.py -c`` and is indexed by a
+    tz-aware timestamp. ``solar_positions`` is the ``solar_azimuth``/``solar_zenith`` pair used for
+    the angle-of-incidence calc; ``env_params`` is the full frame (irradiance, weather, and humidity
+    columns the temperature model and effects read).
+
+    :param intake_file: path to the combined intake CSV.
+    :return: tuple ``(env_params, solar_positions)``.
+    """
+
+    data = read_csv(intake_file, index_col=0, parse_dates=True)
+    solar_positions = data[['solar_azimuth', 'solar_zenith']]
+    return data, solar_positions
+
+
+def _build_module_params(config: dict) -> dict:
+    """
+    Flattens the module-related TOML sections into the single dict ``generate_data`` expects.
+
+    Merges the ``[module]`` CEC reference parameters, the ``[mounting]`` array geometry, and the
+    ``[incident_angle]`` glass parameters that match the chosen IAM model.
+
+    :param config: parsed TOML config.
+    :return: flat dict of CEC params, mounting geometry, and the active IAM glass params.
+    """
+
+    module_params = {**config['module'], **config['mounting']}
+
+    incident_angle = config['incident_angle']
+    for key in _IAM_GLASS_PARAMS[incident_angle['model']]:
+        module_params[key] = incident_angle[key]
+
+    return module_params
+
+
+def _build_effects(config: dict, env_params: DataFrame) -> list:
+    """
+    Instantiates the configured failure objects by walking the class registry.
+
+    For each class in ``FAILURE_CLASSES``, looks up its ``[[effects.<type>]]`` entries and builds
+    one instance per entry, passing the entry's keys as constructor kwargs. Classes with no matching
+    TOML section contribute nothing.
+
+    :param config: parsed TOML config.
+    :param env_params: environmental frame each effect holds for its acceleration math.
+    :return: list of instantiated failure objects, in registry-then-config order.
+    """
+
+    effects_config = config.get('effects', {})
+    effects = []
+    for cls in FAILURE_CLASSES:
+        for entry in effects_config.get(cls.type, []):
+            effects.append(cls(env_params, **entry))
+
+    return effects
+
+
+# Observables dominate resident memory: seven float64 I-V points per (panel, timestep).
+_OBSERVABLE_BYTES = 8 * 7
+# Headroom reserved over the observables frame for the MultiIndex, singlediode scratch, and the OS.
+_CHUNK_SAFETY_FACTOR = 0.5
+
+
+def _compute_chunk_size(memory_cap_gb: float, num_timesteps: int) -> int:
+    """
+    Derives how many panels fit in one chunk under the configured memory cap.
+
+    Sizes against the observables frame (``num_timesteps`` rows times seven float64 columns per
+    panel), scaled by a safety factor reserving room for the index, the single-diode solver's
+    scratch space, and other live objects. Returns at least one panel so a tight cap still makes
+    progress.
+
+    :param memory_cap_gb: per-chunk memory budget in gigabytes, from ``[runtime]``.
+    :param num_timesteps: length of the simulation time axis.
+    :return: chunk size in panels (>= 1).
+    """
+
+    bytes_per_panel = num_timesteps * _OBSERVABLE_BYTES
+    budget_bytes = memory_cap_gb * 1e9 * _CHUNK_SAFETY_FACTOR
+    return max(1, int(budget_bytes // bytes_per_panel))
+
+
+def _chunk_ranges(num_panels: int, chunk_size: int) -> list[range]:
+    """
+    Partitions ``range(num_panels)`` into contiguous global-id chunks of at most ``chunk_size``.
+
+    :param num_panels: total fleet size.
+    :param chunk_size: maximum panels per chunk.
+    :return: list of ``range`` objects covering ``[0, num_panels)`` without overlap.
+    """
+
+    return [range(start, min(start + chunk_size, num_panels))
+            for start in range(0, num_panels, chunk_size)]
+
+
+def _write_chunk(observables_dir: Path, attribution_dir: Path, panel_ids: range,
+                 observables: DataFrame, attribution: DataFrame) -> None:
+    """
+    Writes one chunk's observables and attribution frames as parquet part-files in their datasets.
+
+    File names embed the chunk's global panel-id span so the part-files are ordered and
+    non-colliding within each dataset directory.
+
+    :param observables_dir: dataset directory the observables part-file is written to.
+    :param attribution_dir: dataset directory the attribution part-file is written to.
+    :param panel_ids: the chunk's global panel-id range.
+    :param observables: the chunk's I-V observables frame.
+    :param attribution: the chunk's per-panel onset frame.
+    """
+
+    span = f"{panel_ids.start:08d}_{panel_ids.stop:08d}"
+    observables.to_parquet(observables_dir / f"observables_{span}.parquet")
+    attribution.to_parquet(attribution_dir / f"attribution_{span}.parquet")
 
 def validate_config_file(config: dict) -> None:
     """
@@ -39,7 +202,7 @@ def validate_config_file(config: dict) -> None:
     errors: list[str] = []
 
     required_sections = ('runtime', 'paths', 'singlediode', 'temperature',
-                         'incident_angle', 'module')
+                         'incident_angle', 'module', 'mounting')
     for section in required_sections:
         if section not in config:
             errors.append(f"missing required section [{section}]")
@@ -80,13 +243,8 @@ def validate_config_file(config: dict) -> None:
         valid = list(IncidentAngleModel.__members__)
         errors.append(f"[incident_angle] model='{config['incident_angle']['model']}' not in {valid}")
     else:
-        iam_required = {
-            'PHYSICAL':    ('n', 'K', 'L'),
-            'ASHRAE':      ('b',),
-            'MARTIN_RUIZ': ('a_r',),
-        }
         model = config['incident_angle']['model']
-        for key in iam_required[model]:
+        for key in _IAM_GLASS_PARAMS[model]:
             if key not in config['incident_angle']:
                 errors.append(f"[incident_angle] model='{model}' requires key '{key}'")
 
@@ -95,12 +253,9 @@ def validate_config_file(config: dict) -> None:
         if key not in config['module']:
             errors.append(f"[module] missing required CEC param '{key}'")
 
-    if 'mounting' not in config['module']:
-        errors.append("[module.mounting] missing required subtable")
-    else:
-        for key in ('surface_tilt', 'surface_azimuth'):
-            if key not in config['module']['mounting']:
-                errors.append(f"[module.mounting] missing required key '{key}'")
+    for key in ('surface_tilt', 'surface_azimuth'):
+        if key not in config['mounting']:
+            errors.append(f"[mounting] missing required key '{key}'")
 
     registered_types = {cls.type for cls in FAILURE_CLASSES}
     all_names: list[str] = []
@@ -113,7 +268,7 @@ def validate_config_file(config: dict) -> None:
             continue
         if not isinstance(instances, list):
             errors.append(
-                f"[effects.{type_key}] must be declared as an array of tables ([[effects.{type_key}]]), not a single table"
+                f"[effects.{type_key}] must be declared as an array of tables ([[effects.{type_key}]])"
             )
             continue
         for i, instance in enumerate(instances):
