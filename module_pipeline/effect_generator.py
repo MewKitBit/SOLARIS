@@ -46,9 +46,7 @@ def configure(effects, master_seed: int, num_timesteps: int) -> None:
 def validate_effects() -> None:
     """
     Validates that every registered effect declares its ``affected_columns`` (using only
-    axes listed in ``VALID_PARAMS``) and that no two effects share the same ``name``.
-    Intended to be called from ``main.py`` immediately after ``configure`` so contract
-    violations surface in seconds at startup rather than mid-simulation.
+    axes listed in ``VALID_PARAMS``).
 
     Reads each effect's class-level ``affected_columns`` attribute directly; no
     ``compute_progression`` call is involved. The runtime composition path in
