@@ -79,7 +79,7 @@ def main() -> None:
                         help="Fetch both sources and write meteorology.csv, solar_position.csv, and input_data.csv.")
     parser.add_argument("--cfg", type=Path, required=True, metavar="FILE",
                         help="Path to the unified SOLARIS config TOML (shared with the simulation).")
-    parser.add_argument("--output_dir", type=Path, default=Path("."), metavar="DIR",
+    parser.add_argument("--output-dir", type=Path, default=Path("."), metavar="DIR",
                         help="Directory where output CSV files are written (default: current directory).")
     args = parser.parse_args()
 
