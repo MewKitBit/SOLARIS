@@ -1,4 +1,5 @@
 import argparse
+import multiprocessing as mp
 
 from pandas import DataFrame, read_csv
 from pathlib import Path
@@ -53,15 +54,25 @@ def orchestrator(config: dict) -> None:
     observables_dir.mkdir(parents=True, exist_ok=True)
     attribution_dir.mkdir(parents=True, exist_ok=True)
 
-    chunk_size = _compute_chunk_size(runtime['memory_cap_gb'], num_timesteps)
+    chunk_size = _compute_chunk_size(runtime['memory_cap_gb'], num_timesteps, runtime['num_workers'])
     chunks = _chunk_ranges(runtime['num_panels'], chunk_size)
 
-    # TODO: parallelize chunks across runtime['num_workers'] cores; single-core for now.
-    for panel_ids in chunks:
-        observables, attribution = generate_data(
-            module_params, env_params, solar_positions, temp_model, iam_model, panel_ids, method,
-        )
-        _write_chunk(observables_dir, attribution_dir, panel_ids, observables, attribution)
+    worker_args = (module_params, env_params, solar_positions, temp_model, iam_model, method,
+                   observables_dir, attribution_dir)
+
+    # Cap workers at the chunk count: more workers than chunks would just sit idle.
+    num_workers = min(runtime['num_workers'], len(chunks))
+    if num_workers == 1:
+        for panel_ids in chunks:
+            _simulate_and_write(panel_ids, *worker_args)
+    else:
+        # env_params is referenced both by the effects and standalone in worker_args, but it's the
+        # same object in one pickle stream, so pickle's memo ships it once per worker (not twice).
+        init_args = (effects, runtime['master_seed'], num_timesteps, *worker_args)
+        # 'spawn' (not 'fork') so behaviour avoids fork+threaded-BLAS hazards
+        # Spawned workers start with empty module state, which _init_worker re-establishes.
+        with mp.get_context("spawn").Pool(num_workers, initializer=_init_worker, initargs=init_args) as pool:
+            pool.map(_simulate_and_write_worker, chunks)
 
 
 def _load_inputs(intake_file: str) -> tuple[DataFrame, DataFrame]:
@@ -124,28 +135,31 @@ def _build_effects(config: dict, env_params: DataFrame) -> list:
     return effects
 
 
-# Observables dominate resident memory: seven float64 I-V points per (panel, timestep).
-_OBSERVABLE_BYTES = 8 * 7
-# Headroom reserved over the observables frame for the MultiIndex, singlediode scratch, and the OS.
-_CHUNK_SAFETY_FACTOR = 0.5
+# Resident bytes per (panel, timestep) row of the observables frame, measured with
+# DataFrame.memory_usage(deep=True): seven float64 I-V columns (56 B) plus the MultiIndex codes
+# and 2 bytes of headroom (62 + 2)
+_OBSERVABLE_ROW_BYTES = 64
 
 
-def _compute_chunk_size(memory_cap_gb: float, num_timesteps: int) -> int:
+def _compute_chunk_size(memory_cap_gb: float, num_timesteps: int, num_workers: int) -> int:
     """
-    Derives how many panels fit in one chunk under the configured memory cap.
+    Derives how many panels fit in one chunk so all workers together stay within the cap.
 
-    Sizes against the observables frame (``num_timesteps`` rows times seven float64 columns per
-    panel), scaled by a safety factor reserving room for the index, the single-diode solver's
-    scratch space, and other live objects. Returns at least one panel so a tight cap still makes
-    progress.
+    ``memory_cap_gb`` is the whole-process budget, split across ``num_workers`` before sizing: each
+    worker holds one chunk-sized observables frame at a time, and up to ``num_workers`` of them are
+    resident at once. The frame's footprint is its measured per-row cost (data plus MultiIndex, see
+    ``_OBSERVABLE_ROW_BYTES``) times ``num_timesteps`` per panel; no headroom is reserved, so the
+    cap should be set to the memory the operator will give the pipeline itself, leaving OS and
+    hardware slack to them. Returns at least one panel so a tight cap still makes progress.
 
-    :param memory_cap_gb: per-chunk memory budget in gigabytes, from ``[runtime]``.
+    :param memory_cap_gb: whole-process memory budget in gigabytes, from ``[runtime]``.
     :param num_timesteps: length of the simulation time axis.
+    :param num_workers: number of worker processes the budget is divided across.
     :return: chunk size in panels (>= 1).
     """
 
-    bytes_per_panel = num_timesteps * _OBSERVABLE_BYTES
-    budget_bytes = memory_cap_gb * 1e9 * _CHUNK_SAFETY_FACTOR
+    bytes_per_panel = num_timesteps * _OBSERVABLE_ROW_BYTES
+    budget_bytes = (memory_cap_gb / num_workers) * 1e9
     return max(1, int(budget_bytes // bytes_per_panel))
 
 
@@ -180,6 +194,59 @@ def _write_chunk(observables_dir: Path, attribution_dir: Path, panel_ids: range,
     span = f"{panel_ids.start:08d}_{panel_ids.stop:08d}"
     observables.to_parquet(observables_dir / f"observables_{span}.parquet")
     attribution.to_parquet(attribution_dir / f"attribution_{span}.parquet")
+
+
+# Per-worker context for the parallel path. Under the 'spawn' start method each worker re-imports
+# this module with empty state, so _init_worker re-establishes both the effect_generator config and
+# the shared simulation inputs once per worker; tasks then carry only a panel-id range.
+_WORKER_CONTEXT: dict = {}
+
+
+def _simulate_and_write(panel_ids: range, module_params: dict, env_params: DataFrame,
+                        solar_positions: DataFrame, temp_model: TemperatureModel,
+                        iam_model: IncidentAngleModel, method: SingleDiodeMethod,
+                        observables_dir: Path, attribution_dir: Path) -> None:
+    """
+    Simulates one chunk and writes its part-files. It's the unit of work shared by the sequential and
+    parallel paths. All parameters beyond ``panel_ids`` are forwarded unchanged to ``generate_data``
+    and ``_write_chunk``.
+
+    :param panel_ids: the chunk's global panel-id range.
+    """
+
+    observables, attribution = generate_data(
+        module_params, env_params, solar_positions, temp_model, iam_model, panel_ids, method,
+    )
+    _write_chunk(observables_dir, attribution_dir, panel_ids, observables, attribution)
+
+
+def _init_worker(effects: list, master_seed: int, num_timesteps: int, *worker_args) -> None:
+    """
+    Pool initializer: runs once per worker to restore the state a spawned process lacks.
+
+    Reconfigures ``effect_generator`` (its module-level state is empty after re-import) and stashes
+    the shared simulation inputs for ``_simulate_and_write_worker`` to read.
+
+    :param effects: effect instances to register, as built in the parent process.
+    :param master_seed: root RNG seed.
+    :param num_timesteps: simulation time-axis length.
+    :param worker_args: the positional tail forwarded verbatim to ``_simulate_and_write``.
+    """
+
+    effect_generator.configure(effects, master_seed, num_timesteps)
+    _WORKER_CONTEXT['args'] = worker_args
+
+
+def _simulate_and_write_worker(panel_ids: range) -> None:
+    """
+    Pool task body: simulates and writes one chunk using the per-worker context from
+    ``_init_worker``. Takes only ``panel_ids`` so each task pickles cheaply.
+
+    :param panel_ids: the chunk's global panel-id range.
+    """
+
+    _simulate_and_write(panel_ids, *_WORKER_CONTEXT['args'])
+
 
 def validate_config_file(config: dict) -> None:
     """

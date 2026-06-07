@@ -11,7 +11,7 @@ end_date   = "2020-12-31" # ISO 8601 date, inclusive
 [runtime]
 master_seed   = 42 # root entropy for per-panel-per-effect RNG seeding
 num_panels    = 1000 # total fleet size
-memory_cap_gb = 8.0 # maximum ram usage limit (aproximate)
+memory_cap_gb = 8.0 # maximum ram usage limit (aproximate) to be split across workers
 num_workers   = 1 # 1 = single-core; >1 = multiprocessing.Pool size
 
 [paths]
