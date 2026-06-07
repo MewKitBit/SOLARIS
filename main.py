@@ -17,15 +17,16 @@ except ImportError:
 # IAM glass parameters consumed per incident-angle model; the chosen model's set must be present.
 _IAM_GLASS_PARAMS = {'PHYSICAL': ('n', 'K', 'L'), 'ASHRAE': ('b',), 'MARTIN_RUIZ': ('a_r',)}
 
-
+# TODO: Add logging and console outputs to every step, otherwise the process is a black box until it finishes or fails
+# TODO: Maybe even add a progress bar for the single_diode chunk result writing with sub-bars for each worker
 def orchestrator(config: dict) -> None:
     """
     Runs the full simulation from a validated config: loads the inputs, builds and configures the
     effects, then drives ``generate_data`` over memory-capped chunks, writing each chunk's
     observables and attribution frames to parquet under ``[paths] output_dir``.
 
-    Assumes ``config`` has already passed ``validate_config_file``. Single-core for now; chunks are
-    independent units of work, so parallelizing across ``[runtime] num_workers`` is a later drop-in.
+    Assumes ``config`` has already passed ``validate_config_file``. Chunks are independent units of
+    work that each worker processes one at a time.
 
     :param config: parsed and validated TOML config.
     """
@@ -46,8 +47,7 @@ def orchestrator(config: dict) -> None:
 
     output_dir = Path(config['paths']['output_dir'])
     # Observables and attribution each get their own subdirectory so each is a single-schema
-    # parquet dataset a consumer can read whole with read_parquet(dir); mixing them in one
-    # directory would unify their differing schemas and corrupt the read.
+    # parquet dataset a consumer can read whole with read_parquet(dir)
     observables_dir = output_dir / 'observables'
     attribution_dir = output_dir / 'attribution'
     observables_dir.mkdir(parents=True, exist_ok=True)

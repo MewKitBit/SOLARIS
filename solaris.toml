@@ -5,17 +5,17 @@ longitude = 3.8226 # decimal degrees, positive = east
 timezone  = "UTC" # IANA timezone; localises the gathered DatetimeIndex
 
 [period]
-start_date = "2020-01-01" # ISO 8601 date, inclusive
+start_date = "2010-01-01" # ISO 8601 date, inclusive
 end_date   = "2020-12-31" # ISO 8601 date, inclusive
 
 [runtime]
 master_seed   = 42 # root entropy for per-panel-per-effect RNG seeding
 num_panels    = 1000 # total fleet size
-memory_cap_gb = 8.0 # main.py converts to chunk_size given num_timesteps
+memory_cap_gb = 8.0 # maximum ram usage limit (aproximate)
 num_workers   = 1 # 1 = single-core; >1 = multiprocessing.Pool size
 
 [paths]
-intake_file = "input_data/input_data.csv" # output of meteorology_helpers/gather_data.py -c
+intake_file = "inputs/input_data.csv" # output of meteorology_helpers/gather_data.py -c
 output_dir  = "output/" # chunked parquet files written here
 
 [singlediode]
