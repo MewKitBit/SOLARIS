@@ -1,8 +1,12 @@
 import argparse
+import logging
 import multiprocessing as mp
+import time
 
 from pandas import DataFrame, read_csv
 from pathlib import Path
+from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from module_pipeline import effect_generator
 from module_pipeline.data_generator import generate_data
@@ -15,11 +19,12 @@ try:
 except ImportError:
     import tomli as tomllib
 
+logger = logging.getLogger("solaris")
+
 # IAM glass parameters consumed per incident-angle model; the chosen model's set must be present.
 _IAM_GLASS_PARAMS = {'PHYSICAL': ('n', 'K', 'L'), 'ASHRAE': ('b',), 'MARTIN_RUIZ': ('a_r',)}
 
-# TODO: Add logging and console outputs to every step, otherwise the process is a black box until it finishes or fails
-# TODO: Maybe even add a progress bar for the single_diode chunk result writing with sub-bars for each worker
+
 def orchestrator(config: dict) -> None:
     """
     Runs the full simulation from a validated config: loads the inputs, builds and configures the
@@ -62,17 +67,48 @@ def orchestrator(config: dict) -> None:
 
     # Cap workers at the chunk count: more workers than chunks would just sit idle.
     num_workers = min(runtime['num_workers'], len(chunks))
-    if num_workers == 1:
-        for panel_ids in chunks:
-            _simulate_and_write(panel_ids, *worker_args)
-    else:
-        # env_params is referenced both by the effects and standalone in worker_args, but it's the
-        # same object in one pickle stream, so pickle's memo ships it once per worker (not twice).
-        init_args = (effects, runtime['master_seed'], num_timesteps, *worker_args)
-        # 'spawn' (not 'fork') so behaviour avoids fork+threaded-BLAS hazards
-        # Spawned workers start with empty module state, which _init_worker re-establishes.
-        with mp.get_context("spawn").Pool(num_workers, initializer=_init_worker, initargs=init_args) as pool:
-            pool.map(_simulate_and_write_worker, chunks)
+
+    logger.info("Simulating %d panels over %d timesteps: %d chunk(s) of <=%d panels across %d worker(s)",
+                runtime['num_panels'], num_timesteps, len(chunks), chunk_size, num_workers)
+    logger.info("Effects: %s", ', '.join(effect_generator.get_effect_names()) or 'none')
+    logger.info("Writing observables -> %s, attribution -> %s", observables_dir, attribution_dir)
+
+    start = time.perf_counter()
+    # logging_redirect_tqdm routes log records through tqdm.write so step logs don't garble the bar.
+    with logging_redirect_tqdm(), tqdm(total=runtime['num_panels'], unit='panel', desc='Simulating') as bar:
+        if num_workers == 1:
+            for panel_ids in chunks:
+                elapsed = _simulate_and_write(panel_ids, *worker_args)
+                _record_chunk_done(bar, panel_ids, elapsed)
+        else:
+            # env_params is referenced both by the effects and standalone in worker_args, but it's the
+            # same object in one pickle stream, so pickle's memo ships it once per worker (not twice).
+            init_args = (effects, runtime['master_seed'], num_timesteps, *worker_args)
+            # 'spawn' (not 'fork') so behaviour avoids fork+threaded-BLAS hazards
+            # Spawned workers start with empty module state, which _init_worker re-establishes.
+            with mp.get_context("spawn").Pool(num_workers, initializer=_init_worker, initargs=init_args) as pool:
+                # imap_unordered yields each chunk's (range, elapsed) as it finishes, so the bar
+                # advances on real progress instead of blocking until every chunk is done like map.
+                for panel_ids, elapsed in pool.imap_unordered(_simulate_and_write_worker, chunks):
+                    _record_chunk_done(bar, panel_ids, elapsed)
+
+    logger.info("Done: %d panels in %d chunk(s) in %.1fs",
+                runtime['num_panels'], len(chunks), time.perf_counter() - start)
+
+
+def _record_chunk_done(bar: tqdm, panel_ids: range, elapsed: float) -> None:
+    """
+    Advances the overall progress bar by a finished chunk's panel count and logs its size and timing.
+
+    :param bar: the ``tqdm`` bar tracking progress over the whole fleet.
+    :param panel_ids: the global panel-id range of the chunk that just completed.
+    :param elapsed: the chunk's wall time in seconds.
+    """
+
+    num_panels = len(panel_ids)
+    bar.update(num_panels)
+    logger.info("chunk done: %d panel(s) (%d..%d) in %.2fs",
+                num_panels, panel_ids.start, panel_ids.stop, elapsed)
 
 
 def _load_inputs(intake_file: str) -> tuple[DataFrame, DataFrame]:
@@ -205,19 +241,25 @@ _WORKER_CONTEXT: dict = {}
 def _simulate_and_write(panel_ids: range, module_params: dict, env_params: DataFrame,
                         solar_positions: DataFrame, temp_model: TemperatureModel,
                         iam_model: IncidentAngleModel, method: SingleDiodeMethod,
-                        observables_dir: Path, attribution_dir: Path) -> None:
+                        observables_dir: Path, attribution_dir: Path) -> float:
     """
     Simulates one chunk and writes its part-files. It's the unit of work shared by the sequential and
     parallel paths. All parameters beyond ``panel_ids`` are forwarded unchanged to ``generate_data``
     and ``_write_chunk``.
 
+    Times itself so both paths report identical per-chunk wall time; in the parallel path this is the
+    only place the duration is observable, since the parent sees a chunk only once it returns.
+
     :param panel_ids: the chunk's global panel-id range.
+    :return: the chunk's wall time in seconds (simulate plus write).
     """
 
+    start = time.perf_counter()
     observables, attribution = generate_data(
         module_params, env_params, solar_positions, temp_model, iam_model, panel_ids, method,
     )
     _write_chunk(observables_dir, attribution_dir, panel_ids, observables, attribution)
+    return time.perf_counter() - start
 
 
 def _init_worker(effects: list, master_seed: int, num_timesteps: int, *worker_args) -> None:
@@ -237,15 +279,17 @@ def _init_worker(effects: list, master_seed: int, num_timesteps: int, *worker_ar
     _WORKER_CONTEXT['args'] = worker_args
 
 
-def _simulate_and_write_worker(panel_ids: range) -> None:
+def _simulate_and_write_worker(panel_ids: range) -> tuple[range, float]:
     """
     Pool task body: simulates and writes one chunk using the per-worker context from
     ``_init_worker``. Takes only ``panel_ids`` so each task pickles cheaply.
 
     :param panel_ids: the chunk's global panel-id range.
+    :return: ``(panel_ids, elapsed)`` so the parent can advance the bar and log the chunk's wall time.
     """
 
-    _simulate_and_write(panel_ids, *_WORKER_CONTEXT['args'])
+    elapsed = _simulate_and_write(panel_ids, *_WORKER_CONTEXT['args'])
+    return panel_ids, elapsed
 
 
 def validate_config_file(config: dict) -> None:
@@ -362,6 +406,9 @@ def _format_errors(errors: list[str]) -> str:
     return f"Config file has {len(errors)} violation(s):\n  - {joined}"
 
 def entry_point() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        datefmt="%H:%M:%S")
+
     parser = argparse.ArgumentParser(description="SOLARIS solar module simulation pipeline.")
     parser.add_argument("--cfg", type=Path, metavar="DIR",
                         help="File path from which to read configuration for simulation.")
