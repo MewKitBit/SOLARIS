@@ -5,14 +5,14 @@ longitude = 3.8226 # decimal degrees, positive = east
 timezone  = "UTC" # IANA timezone; localises the gathered DatetimeIndex
 
 [period]
-start_date = "2010-01-01" # ISO 8601 date, inclusive
+start_date = "2005-01-01" # ISO 8601 date, inclusive
 end_date   = "2020-12-31" # ISO 8601 date, inclusive
 
 [runtime]
 master_seed   = 42 # root entropy for per-panel-per-effect RNG seeding
 num_panels    = 1000 # total fleet size
-memory_cap_gb = 8.0 # maximum ram usage limit (aproximate) to be split across workers
-num_workers   = 1 # 1 = single-core; >1 = multiprocessing.Pool size
+memory_cap_gb = 16.0 # maximum ram usage limit (aproximate) to be split across workers
+num_workers   = 2 # 1 = single-core; >1 = multiprocessing.Pool size
 
 [paths]
 intake_file = "inputs/input_data.csv" # output of meteorology_helpers/gather_data.py -c

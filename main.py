@@ -59,8 +59,9 @@ def orchestrator(config: dict) -> None:
     observables_dir.mkdir(parents=True, exist_ok=True)
     attribution_dir.mkdir(parents=True, exist_ok=True)
 
-    chunk_size = _compute_chunk_size(runtime['memory_cap_gb'], num_timesteps, runtime['num_workers'])
-    chunks = _chunk_ranges(runtime['num_panels'], chunk_size)
+    num_chunks = _compute_chunk_count(runtime['num_panels'], runtime['num_workers'],
+                                      runtime['memory_cap_gb'], num_timesteps)
+    chunks = _chunk_ranges(runtime['num_panels'], num_chunks)
 
     worker_args = (module_params, env_params, solar_positions, temp_model, iam_model, method,
                    observables_dir, attribution_dir)
@@ -69,7 +70,7 @@ def orchestrator(config: dict) -> None:
     num_workers = min(runtime['num_workers'], len(chunks))
 
     logger.info("Simulating %d panels over %d timesteps: %d chunk(s) of <=%d panels across %d worker(s)",
-                runtime['num_panels'], num_timesteps, len(chunks), chunk_size, num_workers)
+                runtime['num_panels'], num_timesteps, len(chunks), max(len(c) for c in chunks), num_workers)
     logger.info("Effects: %s", ', '.join(effect_generator.get_effect_names()) or 'none')
     logger.info("Writing observables -> %s, attribution -> %s", observables_dir, attribution_dir)
 
@@ -177,39 +178,53 @@ def _build_effects(config: dict, env_params: DataFrame) -> list:
 _OBSERVABLE_ROW_BYTES = 64
 
 
-def _compute_chunk_size(memory_cap_gb: float, num_timesteps: int, num_workers: int) -> int:
+def _compute_chunk_count(num_panels: int, num_workers: int, memory_cap_gb: float,
+                         num_timesteps: int) -> int:
     """
-    Derives how many panels fit in one chunk so all workers together stay within the cap.
+    Decides how many chunks to split the fleet into for the most even per-worker load.
 
-    ``memory_cap_gb`` is the whole-process budget, split across ``num_workers`` before sizing: each
-    worker holds one chunk-sized observables frame at a time, and up to ``num_workers`` of them are
-    resident at once. The frame's footprint is its measured per-row cost (data plus MultiIndex, see
-    ``_OBSERVABLE_ROW_BYTES``) times ``num_timesteps`` per panel; no headroom is reserved, so the
-    cap should be set to the memory the operator will give the pipeline itself, leaving OS and
-    hardware slack to them. Returns at least one panel so a tight cap still makes progress.
+    The simulation is embarrassingly parallel and CPU-bound, so the ideal is one chunk per worker:
+    an even split keeps every core busy and lets the workers finish together. The memory cap is a
+    ceiling, not a target. Each worker gets ``memory_cap_gb / num_workers`` of the budget, which fits
+    a bounded number of panels (its observables frame is ``num_timesteps`` rows per panel, see
+    ``_OBSERVABLE_ROW_BYTES``). If an even one-chunk-per-worker split fits that share, use exactly
+    ``num_workers`` chunks; if it doesn't, split into the fewest chunks that do fit, so the work stays
+    as evenly divided as possible and is processed in waves.
 
-    :param memory_cap_gb: whole-process memory budget in gigabytes, from ``[runtime]``.
-    :param num_timesteps: length of the simulation time axis.
+    :param num_panels: total fleet size.
     :param num_workers: number of worker processes the budget is divided across.
-    :return: chunk size in panels (>= 1).
+    :param memory_cap_gb: whole-process budget for the observables data, in gigabytes.
+    :param num_timesteps: length of the simulation time axis.
+    :return: number of chunks (at least ``num_workers``, unless the fleet is smaller).
     """
 
     bytes_per_panel = num_timesteps * _OBSERVABLE_ROW_BYTES
-    budget_bytes = (memory_cap_gb / num_workers) * 1e9
-    return max(1, int(budget_bytes // bytes_per_panel))
+    panels_per_worker = max(1, int((memory_cap_gb / num_workers) * 1e9 // bytes_per_panel))
+    # Ceiling division: the fewest chunks whose even split still fits one worker's share.
+    min_chunks_to_fit = (num_panels + panels_per_worker - 1) // panels_per_worker
+    return max(num_workers, min_chunks_to_fit)
 
 
-def _chunk_ranges(num_panels: int, chunk_size: int) -> list[range]:
+def _chunk_ranges(num_panels: int, num_chunks: int) -> list[range]:
     """
-    Partitions ``range(num_panels)`` into contiguous global-id chunks of at most ``chunk_size``.
+    Splits ``range(num_panels)`` into ``num_chunks`` contiguous chunks whose sizes differ by at most
+    one panel, dividing the fleet as evenly as possible.
 
     :param num_panels: total fleet size.
-    :param chunk_size: maximum panels per chunk.
-    :return: list of ``range`` objects covering ``[0, num_panels)`` without overlap.
+    :param num_chunks: number of chunks to divide the fleet into.
+    :return: list of ``range`` objects covering ``[0, num_panels)`` without overlap or gaps.
     """
 
-    return [range(start, min(start + chunk_size, num_panels))
-            for start in range(0, num_panels, chunk_size)]
+    num_chunks = min(num_chunks, num_panels)  # never emit empty chunks when workers exceed panels
+    base, remainder = divmod(num_panels, num_chunks)
+    ranges = []
+    start = 0
+    for i in range(num_chunks):
+        # The first `remainder` chunks take one extra panel so all sizes differ by at most one.
+        size = base + (1 if i < remainder else 0)
+        ranges.append(range(start, start + size))
+        start += size
+    return ranges
 
 
 def _write_chunk(observables_dir: Path, attribution_dir: Path, panel_ids: range,
