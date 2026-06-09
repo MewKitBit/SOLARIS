@@ -1,3 +1,5 @@
+import numpy as np
+
 from pandas import DataFrame, Index, MultiIndex, NaT, Series
 from pvlib import pvsystem, temperature, iam, irradiance
 
@@ -87,6 +89,9 @@ def generate_data(module_params: dict, env_params: DataFrame, solar_positions: D
     effect modifiers to the effective irradiance, cell temperature, and those parameters,
     then runs ``singlediode`` for the seven primary I-V points. Only the I-V points are kept in the
     observables output, the modified single-diode parameters are intermediate and discarded each iteration.
+    Timesteps with zero effective irradiance are excluded from the solve and left at zero: an
+    unilluminated cell has no photocurrent, so its I-V points are all zero regardless of the effect
+    modifiers. This skips the dark roughly-half of the series, where the solver does the most work.
     Observables are pre-allocated as a long-format ``pd.DataFrame`` indexed by ``(panel_id, timestamp)``.
     Per-panel results are written into contiguous row blocks via ``iloc`` to avoid a final ``concat`` copy.
     Per-panel iteration is the cache-friendly call pattern at this project's scale.
@@ -134,12 +139,23 @@ def generate_data(module_params: dict, env_params: DataFrame, solar_positions: D
         dtype=timestamps.dtype,
     )
 
+    # Solve only the lit rows; dark rows keep the frame's pre-set zero (see the function docstring).
+    # The mask is shared across panels: a multiplicative G modifier can only dim a lit row, never
+    # light a dark one, so a row that is dark at baseline is dark for every panel.
+    lit = effective_irradiance.to_numpy() > 0
+    lit_irradiance = effective_irradiance.to_numpy()[lit]
+    lit_temp_cell = temp_cell.to_numpy()[lit]
+
+    def _lit(modifier):
+        # Effect modifiers are full-length arrays (or scalar defaults); subset arrays to the lit rows.
+        return modifier[lit] if isinstance(modifier, np.ndarray) else modifier
+
     for local_idx, panel_num in enumerate(panel_ids):
         modifiers, onsets = compute_modifiers(panel_num)
 
-        # Apply effective irradiance and temp_cell modifiers
-        panel_irr = effective_irradiance * modifiers.get('G', 1.0)
-        panel_temp = temp_cell + modifiers.get('T', 0.0)
+        # Apply effective irradiance and temp_cell modifiers (lit rows only)
+        panel_irr = lit_irradiance * _lit(modifiers.get('G', 1.0))
+        panel_temp = lit_temp_cell + _lit(modifiers.get('T', 0.0))
 
         I_l, I_0, R_s, R_sh, nNsVth = pvsystem.calcparams_cec(
             effective_irradiance=panel_irr,
@@ -154,10 +170,10 @@ def generate_data(module_params: dict, env_params: DataFrame, solar_positions: D
         )
 
         # Additive or multiplicative according to AGGREGATION_RULES (effect_generator)
-        I_l  = I_l * modifiers.get('I_L',  1.0)
-        I_0 = I_0 + modifiers.get('I_0', 0.0)
-        R_s = R_s + modifiers.get('R_s', 0.0)
-        R_sh = R_sh * modifiers.get('R_sh', 1.0)
+        I_l  = I_l * _lit(modifiers.get('I_L',  1.0))
+        I_0 = I_0 + _lit(modifiers.get('I_0', 0.0))
+        R_s = R_s + _lit(modifiers.get('R_s', 0.0))
+        R_sh = R_sh * _lit(modifiers.get('R_sh', 1.0))
 
         iv_points = pvsystem.singlediode(
             photocurrent=I_l,
@@ -168,8 +184,11 @@ def generate_data(module_params: dict, env_params: DataFrame, solar_positions: D
             method=method.value,
         )
 
+        # Scatter the lit-row results into a full-length block; dark rows stay zero.
+        block = np.zeros((num_timesteps, len(iv_point_cols)))
+        block[lit] = np.column_stack([iv_points[col] for col in iv_point_cols])
         start = local_idx * num_timesteps
-        panels.iloc[start:start + num_timesteps] = iv_points[iv_point_cols].values
+        panels.iloc[start:start + num_timesteps] = block
 
         for effect_name, onset_step in onsets.items():
             attribution.at[panel_num, f"{effect_name}_onset"] = timestamps[onset_step]
