@@ -1,6 +1,7 @@
 from .abstract_baseline_failure import AbstractBaselineFailure
+from .simple_soiling import SimpleSoilingModel
 
-FAILURE_CLASSES: tuple[type[AbstractBaselineFailure], ...] = ()
+FAILURE_CLASSES: tuple[type[AbstractBaselineFailure], ...] = (SimpleSoilingModel,)
 """
 Registry of concrete failure classes available to ``main.py``.
 
