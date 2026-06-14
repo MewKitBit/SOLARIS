@@ -51,13 +51,7 @@ def orchestrator(config: dict) -> None:
     effect_generator.configure(effects, runtime['master_seed'], num_timesteps)
     effect_generator.validate_effects()
 
-    output_dir = Path(config['paths']['output_dir'])
-    # Observables and attribution each get their own subdirectory so each is a single-schema
-    # parquet dataset a consumer can read whole with read_parquet(dir)
-    observables_dir = output_dir / 'observables'
-    attribution_dir = output_dir / 'attribution'
-    observables_dir.mkdir(parents=True, exist_ok=True)
-    attribution_dir.mkdir(parents=True, exist_ok=True)
+    observables_dir, attribution_dir = _prepare_output_dirs(Path(config['paths']['output_dir']))
 
     num_chunks = _compute_chunk_count(runtime['num_panels'], runtime['num_workers'],
                                       runtime['memory_cap_gb'], num_timesteps)
@@ -225,6 +219,33 @@ def _chunk_ranges(num_panels: int, num_chunks: int) -> list[range]:
         ranges.append(range(start, start + size))
         start += size
     return ranges
+
+
+def _prepare_output_dirs(output_dir: Path) -> tuple[Path, Path]:
+    """
+    Creates the observables and attribution dataset directories and requires each to be empty.
+
+    Observables and attribution each get their own subdirectory so each is a single-schema parquet
+    dataset a consumer can read whole with ``read_parquet(dir)``. Part-files are named by panel-id
+    span, so a re-run with different chunk boundaries would not overwrite a previous run's files;
+    ``read_parquet(dir)`` would then silently mix the two runs. Refusing to write into a non-empty
+    dataset directory makes that impossible.
+
+    :param output_dir: the ``[paths] output_dir`` root.
+    :return: tuple ``(observables_dir, attribution_dir)``.
+    :raises FileExistsError: when either dataset directory already contains anything.
+    """
+
+    observables_dir = output_dir / 'observables'
+    attribution_dir = output_dir / 'attribution'
+    for directory in (observables_dir, attribution_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+        if any(directory.iterdir()):
+            raise FileExistsError(
+                f"Output directory '{directory}' is not empty. Either move its contents elsewhere, "
+                f"delete them, or point [paths] output_dir to a different location."
+            )
+    return observables_dir, attribution_dir
 
 
 def _write_chunk(observables_dir: Path, attribution_dir: Path, panel_ids: range,
