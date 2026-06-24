@@ -446,7 +446,7 @@ def entry_point() -> None:
                         datefmt="%H:%M:%S")
 
     parser = argparse.ArgumentParser(description="SOLARIS solar module simulation pipeline.")
-    parser.add_argument("--cfg", type=Path, metavar="DIR",
+    parser.add_argument("--cfg", type=Path, metavar="PATH",
                         help="File path from which to read configuration for simulation.")
     args = parser.parse_args()
 
