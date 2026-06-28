@@ -112,7 +112,7 @@ def _load_inputs(intake_file: str) -> tuple[DataFrame, DataFrame]:
 
     The intake file is produced by ``meteorology_helpers/gather_data.py -c`` and is indexed by a
     tz-aware timestamp. ``solar_positions`` is the ``solar_azimuth``/``solar_zenith`` pair used for
-    the angle-of-incidence calc; ``env_params`` is the full frame (irradiance, weather, and humidity
+    the angle-of-incidence calc; ``env_params`` contains the rest (irradiance, weather and humidity
     columns the temperature model and effects read).
 
     :param intake_file: path to the combined intake CSV.
@@ -121,7 +121,8 @@ def _load_inputs(intake_file: str) -> tuple[DataFrame, DataFrame]:
 
     data = read_csv(intake_file, index_col=0, parse_dates=True)
     solar_positions = data[['solar_azimuth', 'solar_zenith']]
-    return data, solar_positions
+    env_params = data.drop(columns=['solar_azimuth', 'solar_zenith'])
+    return env_params, solar_positions
 
 
 def _build_module_params(config: dict) -> dict:
