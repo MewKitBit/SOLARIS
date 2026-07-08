@@ -183,21 +183,23 @@ def _compute_chunk_count(num_panels: int, num_workers: int, memory_cap_gb: float
     ceiling, not a target. Each worker gets ``memory_cap_gb / num_workers`` of the budget, which fits
     a bounded number of panels (its observables frame is ``num_timesteps`` rows per panel, see
     ``_OBSERVABLE_ROW_BYTES``). If an even one-chunk-per-worker split fits that share, use exactly
-    ``num_workers`` chunks; if it doesn't, split into the fewest chunks that do fit, so the work stays
-    as evenly divided as possible and is processed in waves.
+    ``num_workers`` chunks; if it doesn't, round up to the nearest multiple of ``num_workers`` so the
+    work divides into full waves and no worker sits idle while the last wave finishes.
 
     :param num_panels: total fleet size.
     :param num_workers: number of worker processes the budget is divided across.
     :param memory_cap_gb: whole-process budget for the observables data, in gigabytes.
     :param num_timesteps: length of the simulation time axis.
-    :return: number of chunks (at least ``num_workers``, unless the fleet is smaller).
+    :return: number of chunks, always a positive multiple of ``num_workers``.
     """
 
     bytes_per_panel = num_timesteps * _OBSERVABLE_ROW_BYTES
-    panels_per_worker = max(1, int((memory_cap_gb / num_workers) * 1e9 // bytes_per_panel))
+    max_panels_per_worker = max(1, int((memory_cap_gb / num_workers) * 1e9 // bytes_per_panel))
     # Ceiling division: the fewest chunks whose even split still fits one worker's share.
-    min_chunks_to_fit = (num_panels + panels_per_worker - 1) // panels_per_worker
-    return max(num_workers, min_chunks_to_fit)
+    min_chunks_to_fit = (num_panels + max_panels_per_worker - 1) // max_panels_per_worker
+    # Scale to multiple of num_workers to ensure homogeneity in workload
+    num_chunks = num_workers * ((min_chunks_to_fit + num_workers - 1) // num_workers)
+    return num_chunks
 
 
 def _chunk_ranges(num_panels: int, num_chunks: int) -> list[range]:
@@ -381,13 +383,13 @@ def validate_config_file(config: dict) -> None:
 
     if 'model' not in config['temperature']:
         errors.append("[temperature] missing required key 'model'")
-    elif config['temperature']['model'] not in TemperatureModel.__members__:
+    elif config['temperature']['model'].upper() not in TemperatureModel.__members__:
         valid = list(TemperatureModel.__members__)
         errors.append(f"[temperature] model='{config['temperature']['model']}' not in {valid}")
 
     if 'model' not in config['incident_angle']:
         errors.append("[incident_angle] missing required key 'model'")
-    elif config['incident_angle']['model'] not in IncidentAngleModel.__members__:
+    elif config['incident_angle']['model'].upper() not in IncidentAngleModel.__members__:
         valid = list(IncidentAngleModel.__members__)
         errors.append(f"[incident_angle] model='{config['incident_angle']['model']}' not in {valid}")
     else:
