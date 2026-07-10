@@ -99,3 +99,27 @@ def test_distinct_panels_get_distinct_streams():
 
     onsets = [effect_generator.compute_modifiers(panel)[1]['test'] for panel in range(50)]
     assert len(set(onsets)) > 1
+
+
+def test_partitioning_does_not_change_modifiers():
+    """
+    A panel's modifiers depend only on its global id, not on how the fleet is split into chunks.
+
+    Drives the same set of global panel ids through two different chunk partitionings (as
+    main.py would) and asserts every panel gets bit-identical onsets and arrays either way, so
+    changing chunk count or boundaries between runs cannot alter a single result.
+    """
+    num_timesteps = 48
+    effect = _StochasticGEffect('test', _make_env(num_timesteps))
+    effect_generator.configure([effect], master_seed=42, num_timesteps=num_timesteps)
+
+    # Two partitionings of the same global ids [0, 20): different chunk counts and boundaries.
+    partition_a = [range(0, 10), range(10, 20)]
+    partition_b = [range(0, 4), range(4, 9), range(9, 20)]
+
+    results_a = {p: effect_generator.compute_modifiers(p) for chunk in partition_a for p in chunk}
+    results_b = {p: effect_generator.compute_modifiers(p) for chunk in partition_b for p in chunk}
+
+    assert results_a.keys() == results_b.keys()
+    for panel in results_a:
+        _assert_same_result(results_a[panel], results_b[panel])
