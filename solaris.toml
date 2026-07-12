@@ -1,4 +1,4 @@
-# solaris.toml — unified config for the SOLARIS project.
+# solaris.toml - unified config for the SOLARIS project.
 [location]
 latitude  = 43.4636 # decimal degrees, positive = north
 longitude = 3.8226 # decimal degrees, positive = east
@@ -10,13 +10,13 @@ end_date   = "2020-12-31" # ISO 8601 date, inclusive
 
 [runtime]
 master_seed   = 42 # root entropy for per-panel-per-effect RNG seeding
-num_panels    = 1000 # total fleet size
+num_panels    = 10000 # total fleet size
 memory_cap_gb = 16.0 # maximum ram usage limit (aproximate) to be split across workers
-num_workers   = 3 # 1 = single-core; >1 = multiprocessing.Pool size
+num_workers   = 4 # 1 = single-core; >1 = multiprocessing.Pool size
 
 [paths]
 intake_file = "inputs/input_data.csv" # output of meteorology_helpers/gather_data.py -c
-output_dir  = "output/" # chunked parquet files written here
+output_dir  = "output_composed/" # chunked parquet files written here
 
 [singlediode]
 method = "NEWTON" # one of SingleDiodeMethod enum members
@@ -34,15 +34,16 @@ L = 0.002 # PHYSICAL: glazing thickness (m)
 # a_r = 0.16 # MARTIN_RUIZ
 
 [module]
-# CEC single-diode reference parameters; sourced from the CEC module database
-# entry for the modelled panel.
-alpha_sc = 0.0042
-a_ref    = 1.6816
-I_L_ref  = 9.66
-I_o_ref  = 5.94e-11
-R_sh_ref = 480.5
-R_s      = 0.39383
-Adjust   = 11.4
+# CEC single-diode reference parameters, taken verbatim from the CEC module
+# database entry for the Canadian Solar CS3W-400P (400 W, 72-cell multi-Si),
+# a widely deployed utility/commercial module.
+alpha_sc = 0.002409
+a_ref    = 1.756127
+I_L_ref  = 10.904441
+I_o_ref  = 2.303482e-11
+R_sh_ref = 741.889771
+R_s      = 0.302266
+Adjust   = 3.759108
 
 [mounting]
 # Array orientation
@@ -52,13 +53,8 @@ surface_azimuth = 180.0 # degrees clockwise from north
 # Effects are nested arrays of tables: one outer key per concrete failure class
 # (matching its `type` class attribute, e.g. `pid`), one inner entry per
 # registered instance of that class. The instance's `name` becomes its
-# attribution column prefix and must be unique across all effects (enforced by
+# attribaution column prefix and must be unique across all effects (enforced by
 # effect_generator.validate_effects).
-# [[effects.pid]]
-# name                   = "pid"
-# beta                   = 1.5 # Weibull shape parameter
-# eta_hours              = 50000.0 # Weibull scale parameter (effective stress hours)
-
 [[effects.soiling_variant]]
 name                  = "soiling" # attribution column prefix; must be unique across effects
 max_soiling_effect    = 0.3 # cap on the fractional irradiance loss (0..1); 0.3 = up to 30% loss
@@ -67,3 +63,12 @@ std_deviation         = 3.0e-5 # per-step noise on the progression; negative dra
 # Initial-soiling distribution (optional; fall back to the constructor defaults if omitted)
 starting_median_fraction = 0.25 # median initial level as a fraction of max_soiling_effect
 starting_shape_sigma     = 0.5 # sigma of the lognormal initial-level draw; larger = wider spread
+
+[[effects.soiling_variant]]
+name                  = "soiling_slow" # attribution column prefix; must be unique across effects
+max_soiling_effect    = 0.5 # cap on the fractional irradiance loss (0..1); 0.3 = up to 30% loss
+avg_hourly_progression = 0.25e-5 # mean per-hour increase in the soiling fraction (positive drift)
+std_deviation         = 3.0e-5 # per-step noise on the progression; negative draws model cleaning
+# Initial-soiling distribution (optional; fall back to the constructor defaults if omitted)
+starting_median_fraction = 1.0e-5 # median initial level as a fraction of max_soiling_effect
+starting_shape_sigma     = 0.0 # sigma of the lognormal initial-level draw; larger = wider spread
